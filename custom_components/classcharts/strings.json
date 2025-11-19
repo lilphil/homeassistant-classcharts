@@ -1,0 +1,24 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ClassCharts Configuration",
+        "description": "Enter your ClassCharts parent account credentials",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password",
+      "no_pupils": "Account has no pupils attached",
+      "validation_error": "Validation error occurred",
+      "unknown": "Unknown error occurred"
+    },
+    "abort": {
+      "already_configured": "This email is already configured"
+    }
+  }
+}
+
