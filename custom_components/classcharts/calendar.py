@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util.dt import parse_datetime
 
 from pyclasscharts import ParentClient
 from pyclasscharts.exceptions import AuthenticationError, ValidationError
@@ -71,11 +72,13 @@ class ClassChartsCalendarEntity(
     ) -> None:
         """Initialize the calendar entity."""
         super().__init__(coordinator)
+        pupil_name = pupil.get("name", f"Pupil {pupil_id}")
+
         self._pupil_id = pupil_id
         self._pupil = pupil
         self._entry_id = entry_id
-        self._attr_unique_id = f"{entry_id}_{pupil_id}"
-        self._attr_name = "Timetable"
+        self._attr_unique_id = f"{entry_id}_{pupil_id}_timetable"
+        self._attr_name = f"Timetable"
         self._update_device_info()
 
     def _update_device_info(self) -> None:
@@ -117,89 +120,38 @@ class ClassChartsCalendarEntity(
             start_date_time,
             end_date_time,
         )
-        
-        # Create a client for this pupil
-        client = self.coordinator.get_client_for_pupil(self._pupil_id)
-        
-        try:
-            # Login and select pupil
-            _LOGGER.debug("Logging in and selecting pupil %s", self._pupil_id)
-            await hass.async_add_executor_job(client.login)
-            await hass.async_add_executor_job(client.select_pupil, self._pupil_id)
+
+        # Fetch lessons for each day in the range
+        current_date = start_date_time.date()
+        end_date = end_date_time.date()
             
-            # Fetch lessons for each day in the range
-            current_date = start_date_time.date()
-            end_date = end_date_time.date()
-            
-            while current_date <= end_date:
-                try:
-                    date_str = current_date.strftime("%Y-%m-%d")
-                    _LOGGER.debug("Fetching lessons for date %s", date_str)
-                    lessons_response = await hass.async_add_executor_job(
-                        client.get_lessons,
-                        {"date": date_str}
-                    )
-                    
-                    _LOGGER.debug(
-                        "Lessons response for %s: %s",
-                        date_str,
-                        lessons_response,
-                    )
-                    
-                    lessons_data = lessons_response.get("data", [])
-                    _LOGGER.debug(
-                        "Found %d lessons for %s",
-                        len(lessons_data),
-                        date_str,
-                    )
-                    
-                    for lesson in lessons_data:
-                        event = self._lesson_to_event(lesson, current_date)
-                        if event:
-                            events.append(event)
-                            _LOGGER.debug(
-                                "Created event: %s at %s",
-                                event.summary,
-                                event.start,
-                            )
-                        else:
-                            _LOGGER.debug(
-                                "Failed to convert lesson to event: %s",
-                                lesson,
-                            )
-                except Exception as err:  # noqa: BLE001
-                    _LOGGER.warning(
-                        "Error fetching lessons for date %s: %s",
-                        current_date,
-                        err,
-                        exc_info=True,
-                    )
-                    # Skip days that fail, continue with next day
-                
-                current_date += timedelta(days=1)
-                
-        except (AuthenticationError, ValidationError) as err:
-            _LOGGER.error(
-                "Authentication/validation error fetching events for pupil %s: %s",
-                pupil_name,
-                err,
-            )
-            return []
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.error(
-                "Unexpected error fetching events for pupil %s: %s",
-                pupil_name,
-                err,
-                exc_info=True,
-            )
-            return []
+        lessons_data = await self.coordinator.get_lesson_data_for_pupil_between_dates(self._pupil_id, current_date, end_date)
+        for lesson in lessons_data:
+            try:
+                # Parse the lesson date from the lesson dict
+                lesson_date = datetime.strptime(lesson["date"], "%Y-%m-%d").date()
+            except (ValueError, KeyError) as err:
+                _LOGGER.debug(
+                    "Skipping lesson due to invalid or missing date: %s, error: %s",
+                    lesson,
+                    err
+                )
+                continue
+
+            event = self._lesson_to_event(lesson, lesson_date)
+            if event:
+                events.append(event)
+                _LOGGER.debug(
+                    "Created event: %s at %s",
+                    event.summary,
+                    event.start,
+                )
+            else:
+                _LOGGER.debug(
+                    "Failed to convert lesson to event: %s",
+                    lesson,
+                )
         
-        _LOGGER.info(
-            "Fetched %d events for pupil %s (ID: %s)",
-            len(events),
-            pupil_name,
-            self._pupil_id,
-        )
         return events
 
     def _lesson_to_event(self, lesson: Lesson, lesson_date: date) -> CalendarEvent | None:
@@ -218,10 +170,9 @@ class ClassChartsCalendarEntity(
                 )
                 return None
             
-            # Parse time (format is typically HH:MM)
             try:
-                start_hour, start_minute = map(int, start_time_str.split(":"))
-                end_hour, end_minute = map(int, end_time_str.split(":"))
+                start_datetime = parse_datetime(start_time_str)
+                end_datetime = parse_datetime(end_time_str)
             except (ValueError, AttributeError) as err:
                 _LOGGER.debug(
                     "Failed to parse time: start_time=%s, end_time=%s, error=%s",
@@ -230,15 +181,27 @@ class ClassChartsCalendarEntity(
                     err,
                 )
                 return None
+            # # Parse time (format is typically HH:MM)
+            # try:    
+            #     start_hour, start_minute = map(int, start_time_str.split(":"))
+            #     end_hour, end_minute = map(int, end_time_str.split(":"))
+            # except (ValueError, AttributeError) as err:
+            #     _LOGGER.debug(
+            #         "Failed to parse time: start_time=%s, end_time=%s, error=%s",
+            #         start_time_str,
+            #         end_time_str,
+            #         err,
+            #     )
+            #     return None
             
-            start_datetime = datetime.combine(
-                lesson_date,
-                time(hour=start_hour, minute=start_minute),
-            )
-            end_datetime = datetime.combine(
-                lesson_date,
-                time(hour=end_hour, minute=end_minute),
-            )
+            # start_datetime = datetime.combine(
+            #     lesson_date,
+            #     time(hour=start_hour, minute=start_minute),
+            # )
+            # end_datetime = datetime.combine(
+            #     lesson_date,
+            #     time(hour=end_hour, minute=end_minute),
+            # )
             
             # Build event title
             subject = lesson.get("subject_name", "Unknown Subject")
